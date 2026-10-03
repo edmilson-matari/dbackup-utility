@@ -12,53 +12,57 @@ import signal
 
 console = Console()
 
-def handle_sigint(signum, frame):
-    print("\nOperation cancelled by user.")
-    sys.exit(0)
-
 def main():
     console.print(Panel("Backup My Database", title="DBackup", border_style="blue"))
     console.print(f"[red][WARNING][/red] YOU need to have the db installed at your system to be able to do the backup!")
     custom_style_fancy = questionary.Style([("highlighted", "bold"),])
     framework = questionary.select("What's your DB: ", choices=["MySQL", "PostgreSQL", "MongoDB"], pointer="->", show_selected=True, style=custom_style_fancy).unsafe_ask()
+    db = credentials(framework)
     match framework:
         case "MySQL":
-            mysql_backup()
+            mysql_backup(db)
         case "PostgreSQL":
-            postgresql_backup()
+            postgresql_backup(db)
         case "MongoDB":
-            mongodb_backup()
+            mongodb_backup(db)
 
-def credentials():
-    autocompletelist = []
+def credentials(framework: str):
+    autocompletelist = ["localhost", "root", "postgres"]
+    db = {}
     try:
-        with open('autocomplete.csv', 'r', newline='') as csvfile:
-            reader = csv.DictReader(csvfile);
-            for row in reader:
-                autocompletelist.append(row['host'])
-                autocompletelist.append(row['user'])
+        with open('autocomplete', 'r', newline='') as file:
+            for row in file:
+                autocompletelist.append(row.rstrip())
     except FileNotFoundError:
         pass
-    host = questionary.autocomplete("host: ", choices=autocompletelist).unsafe_ask()
-    user = questionary.autocomplete("user: ", choices=autocompletelist).unsafe_ask()
-    password = questionary.password("password: ").unsafe_ask()
-    database = questionary.autocomplete("database name: ", choices=autocompletelist).unsafe_ask()
+    if framework == "MongoDB":
+        db['uri'] = questionary.autocomplete("uri: ", choices=autocompletelist).unsafe_ask()
+        db['password'] = questionary.password("password: ").unsafe_ask()  
+        db['database'] = questionary.autocomplete("database: ", choices=autocompletelist).unsafe_ask()
+
+    else:
+        db['host'] = questionary.autocomplete("host: ", choices=autocompletelist).unsafe_ask()
+        db['user'] = questionary.autocomplete("user: ", choices=autocompletelist).unsafe_ask()
+        db['password'] = questionary.password("password: ").unsafe_ask()
+        db['database'] = questionary.autocomplete("database name: ", choices=autocompletelist).unsafe_ask()
+        if framework == "PostgreSQL":
+            db['port'] = questionary.select("port: ", choices=["5432", "other"]).unsafe_ask()
+            if db['port'] == "other":
+                db['port'] = questionary.text("port: ").unsafe_ask()
     try:
-        with open('autocomplete.csv', mode='a', newline='', encoding="utf-8") as csvfile:
-            fieldname = ['host', 'user', 'database']
-            writer = csv.DictWriter(csvfile, fieldnames=fieldname)
-            writer.writeheader()
-            writer.writerow({'host': host, 'user': user, 'database': database})
+        with open('autocomplete', mode='a', newline='', encoding="utf-8") as file:
+            for value in db.values():
+                if value not in autocompletelist:
+                    file.write(f"{value}\n")
     except FileNotFoundError:
         pass
-    return {"host": host, "user": user, "password": password, "database": database}
+    return db
 
 def get_timestamp():
     return datetime.now().strftime("%Y-%m-%d_%H%M%S");
 
-def mysql_backup():
+def mysql_backup(db: dict):
     install_connector("mysql")
-    db = credentials()
     import mysql.connector
     from mysql.connector import Error
     try:
@@ -92,22 +96,20 @@ def mysql_backup():
                     subprocess.run(command, env=env, stdout=f, check=True)
 
                 console.print(f"[green]SUCCESS[/green] Compressed backup saved to [bold]{backup_file}[/bold]")
-
+        return True
     except Error as e:
         console.print(f"[bold][red]FAIL[/bold][/red] connecting to the database {db['database']} error: {e}")
+        return False
     except subprocess.CalledProcessError as e:
         if os.path.exists(backup_file):
             os.remove(backup_file)
         console.print(f"[bold][red]FAIL[/bold][/red] Backup process failed: {e}")
+        return False
 
-def postgresql_backup():
+def postgresql_backup(db: dict):
     install_connector("postgresql")
     import psycopg2
     from psycopg2 import OperationalError
-    db = credentials()
-    db['port'] = questionary.select("port: ", choices=["5432", "other"]).unsafe_ask()
-    if db['port'] == "other":
-        db['port'] = questionary.text("port: ").unsafe_ask()
     connexion = f"host={db['host']} dbname={db['database']} user={db['user']} password={db['password']} port={db['port']}"
     try:
         console.print("Connecting to PostgreSQL database")
@@ -132,8 +134,12 @@ def postgresql_backup():
                     with gzip.open(file, "wt", encoding="utf-8") as f:
                         subprocess.run(command, stdout=f, check=True)
                         console.print(f"[green]Backup Successully made.[/green]")
+                else:
+                    console.print(f"backup process [bold][red]cancelled[/red][/bold] by user")
+        return True
     except OperationalError as error:
-        console.print(f"[red][bold]Error[/bold][/red] connecting to database {db['database']}")
+        console.print(f"[red][bold]Error[/bold][/red] connecting to database {db['database']}: {error}")
+        return False
     except (subprocess.CalledProcessError, OSError) as e:
         console.print(f"[bold][red]FAIL[/bold][/red]Backup process or compression failed: {e}")
         if file and os.path.exists(file):
@@ -141,17 +147,15 @@ def postgresql_backup():
                 os.remove(file)
             except OSError:
                 pass
+        return False
 
-def mongodb_backup():
+def mongodb_backup(db: dict):
     install_connector("mongodb")
     from pymongo import MongoClient
-    from pymongo.errors import ServerSelectionTimeoutError
+    from pymongo.errors import ServerSelectionTimeoutError, OperationFailure
     file = None
     import re
-    normal_uri = questionary.text("uri: ").unsafe_ask()
-    password = questionary.password("password: ").unsafe_ask()
-    uri = re.sub(r"<db_password>", password,normal_uri)
-    database = questionary.text("database: ").unsafe_ask()
+    uri = re.sub(r"<db_password>", db['password'], db['uri'])
     try:
         client = MongoClient(uri, serverSelectionTimeoutMS=3000)
         client.server_info()
@@ -162,8 +166,8 @@ def mongodb_backup():
             file = f"{database}_mongobackup_{timestamp}"
             command = [
                     "mongodump",
-                    f"--uri={uri}",
-                    f"--db={database}",
+                    f"--uri={db['uri']}",
+                    f"--db={db['database']}",
                     "--archive"
             ]
             console.print("Starting backup and compressing...")
@@ -171,8 +175,10 @@ def mongodb_backup():
                 subprocess.run(command, stdout=f, check=True)
             console.print("[green]SUCCESS[/green] Backup and compression finished")
             client.close()
-    except ServerSelectionTimeoutError as e:
+        return True
+    except (ServerSelectionTimeoutError, OperationFailure) as e:
         console.print(f"[bold][red]FAIL[/bold][/red] connecting to MongoDB: {e}")
+        return False
     except (subprocess.CalledProcessError, OSError) as e:
         console.print(f"[bold][red]FAIL[/bold][/red] MongoDB backup process failed: {e}")
         if backup_file and os.path.exists(backup_file):
@@ -180,6 +186,7 @@ def mongodb_backup():
                 os.remove(backup_file)
             except OSError:
                 pass
+        return False
 
 def install_connector(package: str):
     connectors = {"mysql": "mysql-connector-python", "postgresql": "psycopg2-binary", "mongodb": "pymongo"}
