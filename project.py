@@ -2,13 +2,13 @@ import questionary
 from rich.console import Console
 from rich.panel import Panel
 import importlib.util
+from pathlib import Path
+import shutil
 import subprocess
 import sys
-import csv
 from datetime import datetime
 import os
 import gzip
-import signal
 
 console = Console()
 
@@ -94,8 +94,8 @@ def mysql_backup(db: dict):
 
                 with gzip.open(backup_file, "wt", encoding="utf-8") as f:
                     subprocess.run(command, env=env, stdout=f, check=True)
-
                 console.print(f"[green]SUCCESS[/green] Compressed backup saved to [bold]{backup_file}[/bold]")
+                save_file(backup_file)
         return True
     except Error as e:
         console.print(f"[bold][red]FAIL[/bold][/red] connecting to the database {db['database']} error: {e}")
@@ -134,6 +134,7 @@ def postgresql_backup(db: dict):
                     with gzip.open(file, "wt", encoding="utf-8") as f:
                         subprocess.run(command, stdout=f, check=True)
                         console.print(f"[green]Backup Successully made.[/green]")
+                        save_file(file)
                 else:
                     console.print(f"backup process [bold][red]cancelled[/red][/bold] by user")
         return True
@@ -141,7 +142,7 @@ def postgresql_backup(db: dict):
         console.print(f"[red][bold]Error[/bold][/red] connecting to database {db['database']}: {error}")
         return False
     except (subprocess.CalledProcessError, OSError) as e:
-        console.print(f"[bold][red]FAIL[/bold][/red]Backup process or compression failed: {e}")
+        console.print(f"[bold][red]FAIL[/bold][/red] Backup process or compression failed: {e}")
         if file and os.path.exists(file):
             try:
                 os.remove(file)
@@ -166,7 +167,7 @@ def mongodb_backup(db: dict):
             file = f"{database}_mongobackup_{timestamp}"
             command = [
                     "mongodump",
-                    f"--uri={db['uri']}",
+                    f"--uri={uri}",
                     f"--db={db['database']}",
                     "--archive"
             ]
@@ -174,6 +175,7 @@ def mongodb_backup(db: dict):
             with gzip.open(file, "wt", encoding="utf-8") as f:
                 subprocess.run(command, stdout=f, check=True)
             console.print("[green]SUCCESS[/green] Backup and compression finished")
+            save_file(file)
             client.close()
         return True
     except (ServerSelectionTimeoutError, OperationFailure) as e:
@@ -181,12 +183,24 @@ def mongodb_backup(db: dict):
         return False
     except (subprocess.CalledProcessError, OSError) as e:
         console.print(f"[bold][red]FAIL[/bold][/red] MongoDB backup process failed: {e}")
-        if backup_file and os.path.exists(backup_file):
+        if file and os.path.exists(file):
             try:
-                os.remove(backup_file)
+                os.remove(file)
             except OSError:
                 pass
         return False
+
+def save_file(backup_file: str):
+    cwd = Path.cwd()
+    org = Path(str(cwd)+"/"+backup_file)
+    dest = questionary.path("Save backup file in dir: ").unsafe_ask()
+    dest_path = Path(dest)
+    dest_path.mkdir(parents=True, exist_ok=True)
+    if org.exists():
+        shutil.move(str(org), str(dest))
+        console.print(f"{backup_file} [bold][green]saved[/green][/bold]")
+    else:
+        console.print(f"{backup_file} [bold][red]not found[/red][/bold]")
 
 def install_connector(package: str):
     connectors = {"mysql": "mysql-connector-python", "postgresql": "psycopg2-binary", "mongodb": "pymongo"}
